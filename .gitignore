@@ -172,3 +172,13 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# At the bottom of .gitignore, add:
+# Project-specific ignores
+02-Data/
+03-Models/
+*.pt
+*.jpg
+*.png
+*.csv
+
