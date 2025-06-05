@@ -973,7 +973,6 @@ elif page == "Approvals (GSC & Inspectors)":
                     display_ticket_details(ticket) # show_actions defaults to True implicitly now
                     st.markdown("---")
 
-
 elif page == "Submit New Estimate (Inspectors)":
     st.header("Submit New Repair Ticket")
     with st.form("new_ticket_form", clear_on_submit=True):
