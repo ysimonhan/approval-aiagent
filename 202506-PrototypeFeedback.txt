@@ -1,8 +1,12 @@
-- How to include SOPs into prototype? 
-- Idea: compare AI repair erstimate with human inspectors (30%) 
-- Have possibility to later do adjustments to tickets (10%) 
+Prio 1
 - User login mit unterschiedlichem Access zu Functionen der App
 - Chat Funktion zwischen GSC und inspectors
-- YOLO Model fine-tunen
 - YOLO Output visible machen + checken, wie Aya reagiert
+- How to include SOPs into prototype? 
+
+Prio 2
+- Button Handling improvement for evaluating AI decisions
+- Idea: compare AI repair erstimate with human inspectors (30%) 
+- Have possibility to later do adjustments to tickets (10%) 
+- YOLO Model fine-tunen
 - Subjective capability of AI Agent stärker rausbringen, da aktuell sehr stark rule-based zum Vorschein kommt
