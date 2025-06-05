@@ -974,7 +974,7 @@ elif page == "Approvals (GSC & Inspectors)":
                     st.markdown("---")
 
 
-elif page == "Submit New Ticket (Inspectors)":
+elif page == "Submit New Estimate (Inspectors)":
     st.header("Submit New Repair Ticket")
     with st.form("new_ticket_form", clear_on_submit=True):
         c1, c2 = st.columns(2)

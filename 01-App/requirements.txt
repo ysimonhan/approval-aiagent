@@ -1,8 +1,0 @@
-streamlit
-pandas
-cohere
-Pillow
-opencv-python-headless
-numpy
-ultralytics
-opencv-python-headless
