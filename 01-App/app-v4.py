@@ -11,6 +11,8 @@ from PIL import Image as PILImage # For image handling
 import cv2 # For image processing (if needed)
 import numpy as np
 from ultralytics import YOLO 
+from mistralai import Mistral # For OCR processing
+import base64
 
 # --- Configuration ---
 # (YC startups often use .env files or cloud secret managers for production)
@@ -18,6 +20,10 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 COHERE_API_KEY = "9umxICMmVXpk6trBETGkfCPvHBzCV9TSjgyEVxWP"
 COHERE_AYA_MODEL = "c4ai-aya-vision-32b" # Check Cohere documentation for latest vision-capable models on v2/chat
 YOLO_MODEL_PATH = os.path.join(BASE_DIR, "../03-Models/yolov8m.pt") # <<< IMPORTANT: Update this path to your YOLOv8 model file (.pt)
+MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "wuJauJ5WhHxpOXPv3eFkG1lGlq3Y0yXK") # Get from environment variable
+
+# Initialize Mistral client
+mistral_client = Mistral(api_key=MISTRAL_API_KEY) if MISTRAL_API_KEY != "YOUR_MISTRAL_API_KEY" else None
 
 # Placeholder for custom model integration
 CUSTOM_MODEL_CONFIG = {
@@ -76,6 +82,144 @@ def generate_ticket_id():
 
 def get_current_timestamp():
     return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+# --- SOP Processing Functions ---
+def process_sop_with_mistral_ocr(uploaded_file):
+    """Process an uploaded SOP document using Mistral OCR."""
+    if not mistral_client:
+        st.error("Mistral API key not configured. Please set MISTRAL_API_KEY environment variable.")
+        return None
+    
+    try:
+        # Convert uploaded file to base64
+        base64_pdf = base64.b64encode(uploaded_file.getvalue()).decode('utf-8')
+        
+        # Process with Mistral OCR using base64
+        ocr_response = mistral_client.ocr.process(
+            model="mistral-ocr-latest",
+            document={
+                "type": "document_url",
+                "document_url": f"data:application/pdf;base64,{base64_pdf}"
+            },
+            include_image_base64=True
+        )
+        
+        return ocr_response
+            
+    except Exception as e:
+        st.error(f"Error processing SOP with Mistral OCR: {e}")
+        return None
+
+def analyze_sop_with_cohere(ocr_result):
+    """Analyze OCR results with Cohere Aya to extract repair codes requiring images."""
+    if not COHERE_API_KEY:
+        st.error("Cohere API key not configured.")
+        return None
+    
+    try:
+        co = cohere.Client(COHERE_API_KEY)
+        
+        # Combine all pages' markdown content
+        # OCR result is an object, not a dictionary, so use attribute access
+        full_text = "\n".join(page.markdown for page in ocr_result.pages)
+        
+        prompt = f"""You are an AI assistant analyzing a Standard Operating Procedure (SOP) document for container repairs.
+        Your task is to identify repair codes that require images for documentation.
+        
+        Document content:
+        {full_text}
+        
+        Please analyze the text and identify any repair codes that explicitly require images or visual documentation.
+        For each identified code, provide:
+        1. The repair code (e.g., DMG001)
+        2. A brief description of why images are required
+        
+        Format your response as a JSON object with repair codes as keys and descriptions as values.
+        Example format:
+        {{
+            "DMG001": "Severe damage assessment requiring visual documentation",
+            "CRK003": "Crack inspection requiring photographic evidence"
+        }}
+        
+        Only include codes that explicitly mention image requirements. If no codes are found, return an empty object {{}}.
+        """
+        
+        response = co.chat(model=COHERE_AYA_MODEL, message=prompt)
+        
+        # Extract JSON from response
+        try:
+            json_start = response.text.find('{')
+            json_end = response.text.rfind('}') + 1
+            if json_start != -1 and json_end != -1:
+                return json.loads(response.text[json_start:json_end])
+            return {}
+        except json.JSONDecodeError:
+            st.error("Could not parse Cohere response as JSON")
+            return {}
+            
+    except Exception as e:
+        st.error(f"Error analyzing SOP with Cohere: {e}")
+        return None
+
+def chat_with_ai_agent(ticket_data, user_question, chat_history):
+    """Chat with the Cohere Aya AI agent about the ticket decision."""
+    if not COHERE_API_KEY:
+        st.error("Cohere API key not configured.")
+        return None
+    
+    try:
+        co = cohere.Client(COHERE_API_KEY)
+        
+        # Prepare ticket context
+        repairs_text = "\n".join([f"- {r.get('code', 'N/A')}: {r.get('description', 'No description')}" for r in ticket_data.get('repairs', [])])
+        media_text = "\n".join([f"- {m.get('filename', 'Unknown file')} ({m.get('type', 'unknown')})" for m in ticket_data.get('media', [])])
+        
+        # Get current repair codes requiring images from session state
+        repair_codes_requiring_images = st.session_state.get('repair_codes_needing_images', {})
+        image_req_text = "\n".join([f"- {code}: {desc}" for code, desc in repair_codes_requiring_images.items()]) if repair_codes_requiring_images else "None currently configured"
+        
+        # Prepare chat history context
+        relevant_chat = [msg for msg in chat_history[-5:] if msg.get('sender') in ['AI Agent', 'System']]  # Last 5 AI/System messages
+        chat_context = "\n".join([f"{msg['sender']}: {msg['message']}" for msg in relevant_chat])
+        
+        prompt = f"""You are the AI Repair Ticket Approval Agent that previously analyzed this container repair ticket. 
+        You can answer questions about your decision, reasoning, and provide clarifications about repair approvals.
+
+        TICKET CONTEXT:
+        - Ticket ID: {ticket_data['ticket_id']}
+        - Container ID: {ticket_data['container_id']}
+        - Company: {ticket_data['company']}
+        - Container Age: {ticket_data['container_age']} years
+        - Total Cost: ${ticket_data['total_cost_estimate']}
+        - Repairs: {repairs_text if repairs_text else "None listed"}
+        - Media Files: {media_text if media_text else "None provided"}
+        - Other Notes: {ticket_data.get('other_notes', 'None')}
+
+        CURRENT SYSTEM RULES - REPAIR CODES REQUIRING IMAGES:
+        {image_req_text}
+
+        YOUR PREVIOUS DECISION:
+        - Decision: {ticket_data.get('ai_decision', 'Not yet decided')}
+        - Confidence: {ticket_data.get('ai_confidence', 'N/A')}
+        - Reasoning: {ticket_data.get('ai_reasoning', 'No reasoning provided')}
+        - Missing Data Request: {ticket_data.get('ai_missing_data_request', 'None')}
+
+        RECENT CONVERSATION:
+        {chat_context if chat_context else "No previous AI conversation"}
+
+        USER QUESTION: {user_question}
+
+        Please respond as the AI agent that made the original decision. Be helpful, explain your reasoning clearly, 
+        and provide specific guidance. If the user asks about changing your decision, explain what would be needed.
+        When discussing image requirements, refer to the current system rules above.
+        Keep your response conversational and professional."""
+        
+        response = co.chat(model=COHERE_AYA_MODEL, message=prompt)
+        return response.text
+        
+    except Exception as e:
+        st.error(f"Error chatting with AI agent: {e}")
+        return f"Error: Unable to communicate with AI agent. {e}"
 
 # --- Logging ---
 def log_action(ticket_id, action, details=None, user="System"):
@@ -554,18 +698,44 @@ def display_ticket_details(ticket, expand_details=False):
         # Manual Chat Feature
         if ticket['status'] in ["Manual Review Required", "Additional Data Requested"]:
             st.markdown("---")
-            st.write("**Manual Chat (GSC/Inspector Communication):**")
-            chat_user = "GSC User" # Could be dynamic if auth is added
+            st.write("**Chat with AI Agent & Team Communication:**")
+            chat_user = "GSC/Inspector User" # Could be dynamic if auth is added
             
             # Ensure ai_chat exists and is a list
             if not isinstance(ticket.get('ai_chat'), list):
                 ticket['ai_chat'] = []
 
             for chat_msg in ticket['ai_chat']: # Display existing chat
-                 st.markdown(f"<sub>**[{chat_msg['timestamp']}] {chat_msg['sender']}:** {chat_msg['message']}</sub>", unsafe_allow_html=True)
+                sender_style = "🤖 " if chat_msg['sender'] == "AI Agent" else ""
+                st.markdown(f"<sub>**[{chat_msg['timestamp']}] {sender_style}{chat_msg['sender']}:** {chat_msg['message']}</sub>", unsafe_allow_html=True)
 
-            new_message = st.text_area("Your message:", key=f"manual_chat_input_{ticket['ticket_id']}", height=75)
-            if st.button("Send Message", key=f"send_manual_chat_{ticket['ticket_id']}"):
+            # Chat input section
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                new_message = st.text_area("Your message or question for the AI or Colleagues:", key=f"manual_chat_input_{ticket['ticket_id']}", height=75)
+            with col2:
+                st.write("Send to:")
+                send_to_ai = st.button("🤖 Ask AI Agent", key=f"send_ai_chat_{ticket['ticket_id']}")
+                send_manual = st.button("👥 Send to Team", key=f"send_manual_chat_{ticket['ticket_id']}")
+            
+            if send_to_ai:
+                if new_message:
+                    # Add user message to chat
+                    user_msg_data = {"timestamp": get_current_timestamp(), "sender": chat_user, "message": new_message}
+                    ticket['ai_chat'].append(user_msg_data)
+                    
+                    # Get AI response
+                    with st.spinner("AI Agent is thinking..."):
+                        ai_response = chat_with_ai_agent(ticket, new_message, ticket['ai_chat'])
+                        if ai_response:
+                            ai_msg_data = {"timestamp": get_current_timestamp(), "sender": "AI Agent", "message": ai_response}
+                            ticket['ai_chat'].append(ai_msg_data)
+                            log_action(ticket['ticket_id'], "AI Chat Exchange", {"user_msg": new_message, "ai_response": ai_response}, user=chat_user)
+                    st.rerun()
+                else:
+                    st.warning("Please enter a message or question for the AI.")
+            
+            if send_manual:
                 if new_message:
                     msg_data = {"timestamp": get_current_timestamp(), "sender": chat_user, "message": new_message}
                     ticket['ai_chat'].append(msg_data)
@@ -573,12 +743,42 @@ def display_ticket_details(ticket, expand_details=False):
                     st.rerun()
                 else:
                     st.warning("Please enter a message.")
-        else: # For other statuses, just display chat
+                    
+        else: # For other statuses, allow AI chat for questions
             st.markdown("---")
-            st.write("**Communication Log:**")
-            if not ticket.get('ai_chat'): st.caption("No messages yet.")
-            for chat_msg in ticket.get('ai_chat', []):
-                 st.markdown(f"<sub>**[{chat_msg['timestamp']}] {chat_msg['sender']}:** {chat_msg['message']}</sub>", unsafe_allow_html=True)
+            st.write("**Communication Log & AI Questions:**")
+            
+            # Ensure ai_chat exists and is a list
+            if not isinstance(ticket.get('ai_chat'), list):
+                ticket['ai_chat'] = []
+                
+            if not ticket.get('ai_chat'): 
+                st.caption("No messages yet.")
+            else:
+                for chat_msg in ticket.get('ai_chat', []):
+                    sender_style = "🤖 " if chat_msg['sender'] == "AI Agent" else ""
+                    st.markdown(f"<sub>**[{chat_msg['timestamp']}] {sender_style}{chat_msg['sender']}:** {chat_msg['message']}</sub>", unsafe_allow_html=True)
+            
+            # Allow AI questions even for completed tickets
+            st.write("**Ask the AI Agent about this decision:**")
+            ai_question = st.text_input("Question for AI Agent:", key=f"ai_question_{ticket['ticket_id']}")
+            if st.button("🤖 Ask AI", key=f"ask_ai_{ticket['ticket_id']}"):
+                if ai_question:
+                    chat_user = "User"
+                    # Add user question to chat
+                    user_msg_data = {"timestamp": get_current_timestamp(), "sender": chat_user, "message": ai_question}
+                    ticket['ai_chat'].append(user_msg_data)
+                    
+                    # Get AI response
+                    with st.spinner("AI Agent is responding..."):
+                        ai_response = chat_with_ai_agent(ticket, ai_question, ticket['ai_chat'])
+                        if ai_response:
+                            ai_msg_data = {"timestamp": get_current_timestamp(), "sender": "AI Agent", "message": ai_response}
+                            ticket['ai_chat'].append(ai_msg_data)
+                            log_action(ticket['ticket_id'], "AI Question", {"question": ai_question, "ai_response": ai_response}, user=chat_user)
+                    st.rerun()
+                else:
+                    st.warning("Please enter a question.")
 
 
 if page == "Home (GSC)":
@@ -654,10 +854,44 @@ elif page == "AI Training & Settings (GSC)":
             log_action(None, "AI Image Requirement Removed", {"code_removed": code_to_remove})
             st.success(f"Removed '{code_to_remove}'."); st.rerun()
             
-    # Integrating possibility to upload SOPs (documentation about processes and repair codes requiring images) that automatically extracts text
-    # and images and forwards them to the AI to then add them to list of repair codes needing images.   
+    # SOP Upload and Processing Section
+    st.subheader("Alternative: Upload SOP Documents")
+    st.markdown("Upload Standard Operating Procedure documents to automatically extract repair codes requiring images.")
     
-    st.markdown("---"); st.subheader("Evaluate AI Decisions")
+    uploaded_sop = st.file_uploader(
+        "Upload SOP Document (PDF)",
+        type=['pdf'],
+        key="sop_uploader"
+    )
+    
+    if uploaded_sop:
+        if st.button("Process SOP Document"):
+            with st.spinner("Processing SOP document..."):
+                # Step 1: Process with Mistral OCR
+                ocr_result = process_sop_with_mistral_ocr(uploaded_sop)
+                if ocr_result:
+                    st.success("OCR processing completed.")
+                    
+                    # Step 2: Analyze with Cohere
+                    with st.spinner("Analyzing document content..."):
+                        new_codes = analyze_sop_with_cohere(ocr_result)
+                        
+                        if new_codes:
+                            # Update session state with new codes
+                            st.session_state.repair_codes_needing_images.update(new_codes)
+                            log_action(None, "SOP Analysis Complete", {
+                                "new_codes_added": new_codes,
+                                "total_codes": len(st.session_state.repair_codes_needing_images)
+                            })
+                            st.success(f"Added {len(new_codes)} new repair codes requiring images.")
+                            st.json(new_codes)
+                        else:
+                            st.info("No new repair codes requiring images found in the document.")
+                else:
+                    st.error("Failed to process SOP document.")
+    
+    st.markdown("---")
+    st.subheader("Evaluate AI Decisions")
     ai_processed_tickets = [t for t in st.session_state.tickets if t['status'] in ["AI Approved", "AI Disapproved"] and 'ai_decision' in t]
     if not ai_processed_tickets: st.info("No AI-processed tickets for evaluation yet.")
     else:
